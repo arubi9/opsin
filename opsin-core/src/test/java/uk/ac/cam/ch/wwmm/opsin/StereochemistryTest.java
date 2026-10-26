@@ -18,6 +18,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import org.hamcrest.CoreMatchers;
 
@@ -197,6 +199,33 @@ public class StereochemistryTest {
 		assertEquals(BondStereoValue.CIS, bondStereo.getBondStereoValue());
 	}
 	
+	@ParameterizedTest
+	@CsvSource({
+		"'Cis-9,10-dichloro-9-octadecene', '(9Z)-9,10-dichlorooctadec-9-ene'",
+		"'trans-9,10-dichloro-9-octadecene', '(9E)-9,10-dichlorooctadec-9-ene'",
+		"'cis-9,10-dichlorooctadec-9-ene', '(9Z)-9,10-dichlorooctadec-9-ene'",
+		"'trans-9,10-dichlorooctadec-9-ene', '(9E)-9,10-dichlorooctadec-9-ene'",
+		"'cis-2,3-dibromobut-2-ene', '(Z)-2,3-dibromobut-2-ene'",
+		"'trans-2,3-difluorobut-2-ene', '(E)-2,3-difluorobut-2-ene'",
+		"'9-cis-9,10-dichlorooctadec-9-ene', '(9Z)-9,10-dichlorooctadec-9-ene'"
+	})
+	public void applyCisTransToMatchingHalogens(String name, String equivalentEZName) {
+		OpsinResult result = n2s.parseChemicalName(name);
+		assertEquals(OPSIN_RESULT_STATUS.SUCCESS, result.getStatus(), result.getMessage());
+		OpsinResult expected = n2s.parseChemicalName(equivalentEZName);
+		assertEquals(OPSIN_RESULT_STATUS.SUCCESS, expected.getStatus(), expected.getMessage());
+		assertEquals(expected.getSmiles(), result.getSmiles());
+	}
+
+	@ParameterizedTest
+	@CsvSource({
+		"'cis-2-chlorobut-2-ene'",
+		"'cis-2-bromo-3-chlorobut-2-ene'"
+	})
+	public void rejectAmbiguousAlkeneCisTrans(String name) {
+		assertEquals(OPSIN_RESULT_STATUS.FAILURE, n2s.parseChemicalName(name).getStatus());
+	}
+
 	@Test
 	public void applyStereochemistryTrans() throws StructureBuildingException {
 		Fragment f = n2s.parseChemicalName("trans-but-2-ene").getStructure();
@@ -866,6 +895,31 @@ public class StereochemistryTest {
 		assertEquals(false, StereochemistryHandler.cisTransUnambiguousOnBond(f.findBond(5, 7)));
 	}
 	
+	@ParameterizedTest
+	@CsvSource({
+		"CC(Cl)=C(Cl)C, true",
+		"CC(F)=C(F)C, true",
+		"CC(Br)=C(Br)C, true",
+		"CC(I)=C(I)C, true",
+		"CC([37Cl])=C([37Cl])C, true",
+		"CC([35Cl])=C([37Cl])C, false",
+		"CC(Cl)=C(Br)C, false",
+		"CC(Cl)=C([H])C, false",
+		"ClC(Br)=C(Cl)Br, false"
+	})
+	public void testCisTransMatchingHalogens(String smiles, boolean unambiguous) throws StructureBuildingException {
+		Fragment f = fm.buildSMILES(smiles);
+		Bond doubleBond = null;
+		for (Bond bond : f.getBondSet()) {
+			if (bond.getOrder() == 2) {
+				doubleBond = bond;
+				break;
+			}
+		}
+		assertNotNull(doubleBond);
+		assertEquals(unambiguous, StereochemistryHandler.cisTransUnambiguousOnBond(doubleBond));
+	}
+
 	@Test
 	public void testChiralAtomWhichBecomesAchiral() throws StructureBuildingException {
 		Fragment f = n2s.parseChemicalName("alpha-amino-alanine").getStructure();

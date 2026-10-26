@@ -7,6 +7,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.Map.Entry;
 import java.util.regex.Matcher;
@@ -496,8 +497,9 @@ class StereochemistryHandler {
 	}
 
 	/**
-	 * Does the stereoBond have a hydrogen connected to both ends of it.
-	 * If not it is ambiguous when used in conjunction with cis/trans and E/Z should be used.
+	 * Cis/trans maps directly to Z/E when both ends have a hydrogen, or when
+	 * each carbon has a matching terminal halogen and a carbon substituent.
+	 * Other substitution patterns still require explicit E/Z nomenclature.
 	 * @param potentialBond
 	 * @return
 	 */
@@ -517,9 +519,44 @@ class StereochemistryHandler {
 				foundHydrogen2 =true;
 			}
 		}
-		return (foundHydrogen1 && foundHydrogen2);
+		if (foundHydrogen1 && foundHydrogen2) {
+			return true;
+		}
+		Atom halogen1 = findTerminalHalogenWithCarbonSubstituent(potentialBond.getFromAtom(), potentialBond.getToAtom());
+		Atom halogen2 = findTerminalHalogenWithCarbonSubstituent(potentialBond.getToAtom(), potentialBond.getFromAtom());
+		// Matching halogens outrank carbon at both ends, so cis is Z and trans is E.
+		return halogen1 != null && halogen2 != null
+				&& halogen1.getElement() == halogen2.getElement()
+				&& Objects.equals(halogen1.getIsotope(), halogen2.getIsotope());
 	}
 
+
+	private static Atom findTerminalHalogenWithCarbonSubstituent(Atom atom, Atom otherEnd) {
+		if (atom.getElement() != ChemEl.C || atom.getBondCount() != 3) {
+			return null;
+		}
+		Atom halogen = null;
+		boolean foundCarbon = false;
+		for (Bond bond : atom.getBonds()) {
+			Atom neighbour = bond.getOtherAtom(atom);
+			if (neighbour == otherEnd) {
+				continue;
+			}
+			if (bond.getOrder() != 1) {
+				return null;
+			}
+			if (neighbour.getElement().isHalogen() && neighbour.getBondCount() == 1 && neighbour.getCharge() == 0) {
+				halogen = neighbour;
+			}
+			else if (neighbour.getElement() == ChemEl.C) {
+				foundCarbon = true;
+			}
+			else {
+				return null;
+			}
+		}
+		return foundCarbon ? halogen : null;
+	}
 
 	/**
 	 * Sorts bonds such that those originating from the given fragment are preferred
