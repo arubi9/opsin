@@ -145,6 +145,7 @@ public class NameToStructure {
 			return new OpsinResult(null, OPSIN_RESULT_STATUS.FAILURE, message, name);
 		}
 		String reasonForFailure = "";
+		boolean failureWasStereochemical = false;
 		Fragment fragGeneratedWithWarning = null;
 		List<OpsinWarning> warnings = Collections.emptyList();
 		for(Element parse : parses) {
@@ -177,8 +178,11 @@ public class NameToStructure {
 					warnings = state.getWarnings();
 				}
 			} catch (Exception e) {
-				if (reasonForFailure.length() == 0) {
+				// A stereochemical failure reached structure building and is more informative
+				// than a locant/tokenisation error from an alternative parse.
+				if (reasonForFailure.length() == 0 || (!failureWasStereochemical && e instanceof StereochemistryException)) {
 					reasonForFailure = e.getMessage() != null ? e.getMessage() : "exception with null message";
+					failureWasStereochemical = e instanceof StereochemistryException;
 				}
 				if (LOG.isDebugEnabled()) {
 					LOG.debug(e.getMessage(), e);

@@ -452,6 +452,19 @@ class StereochemistryHandler {
 	private boolean attemptAssignmentOfStereoBondToFragment(Fragment fragment, String eOrZ, String locant, boolean isCisTrans) throws StereochemistryException {
 		if (locant == null){//undefined locant
 			Set<Bond> bondSet = fragment.getBondSet();
+			List<Bond> sortedInterFragmentBonds = sortInterFragmentBonds(state.fragManager.getInterFragmentBonds(fragment), fragment);
+			if (isCisTrans) {
+				Set<Bond> candidates = new HashSet<>(bondSet);
+				candidates.addAll(sortedInterFragmentBonds);
+				int eligibleBonds = 0;
+				for (Bond candidate : candidates) {
+					if (notExplicitlyDefinedStereoBondMap.containsKey(candidate) && cisTransUnambiguousOnBond(candidate)) {
+						if (++eligibleBonds > 1) {
+							throw new StereochemistryException("More than one bond could match unlocanted cis/trans stereochemistry; specify a locant");
+						}
+					}
+				}
+			}
 			for (Bond potentialBond : bondSet) {
 				if (notExplicitlyDefinedStereoBondMap.containsKey(potentialBond) && (!isCisTrans || cisTransUnambiguousOnBond(potentialBond))){
 					applyStereoChemistryToStereoBond(potentialBond, notExplicitlyDefinedStereoBondMap.get(potentialBond), eOrZ);
@@ -459,7 +472,6 @@ class StereochemistryHandler {
 					return true;
 				}
 			}
-			List<Bond> sortedInterFragmentBonds = sortInterFragmentBonds(state.fragManager.getInterFragmentBonds(fragment), fragment);
 			for (Bond potentialBond : sortedInterFragmentBonds) {
 				if (notExplicitlyDefinedStereoBondMap.containsKey(potentialBond) && (!isCisTrans || cisTransUnambiguousOnBond(potentialBond))){
 					applyStereoChemistryToStereoBond(potentialBond, notExplicitlyDefinedStereoBondMap.get(potentialBond), eOrZ);
