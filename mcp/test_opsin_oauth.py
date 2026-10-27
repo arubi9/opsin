@@ -153,6 +153,8 @@ async def test_discovery_registration_and_no_api_key_token(env):
     CALLBACK + "?next=evil", CALLBACK + "#fragment", CALLBACK + "/",
     "https://chatgpt.com/connector/oauth/", "https://chatgpt.com/connector/oauth/a/b",
     "https://chatgpt.com/connector/oauth/%2f", "https://chatgpt.com/connector/oauth/..",
+    "https://chatgpt.com/assistant/oauth/", "https://chatgpt.com/assistant/oauth/a/b",
+    "https://chatgpt.com/assistant/oauth/x/", "https://chatgpt.com/assistant/oauth/%2f",
 ])
 async def test_registration_redirect_allowlist(env, redirect):
     _, http, _ = env
@@ -170,9 +172,13 @@ async def test_registration_metadata_restrictions(env, overrides):
     assert oauth_error(await register(http, **overrides)) in ("invalid_client_metadata", "invalid_redirect_uri")
 
 
-async def test_safe_callback_segment_and_client_metadata_urls_never_fetched(env):
+@pytest.mark.parametrize("redirect", [
+    "https://chatgpt.com/connector/oauth/callback_123-ABC",
+    "https://chatgpt.com/assistant/oauth/27WYzWDApyq9",
+])
+async def test_safe_callback_segment_and_client_metadata_urls_never_fetched(env, redirect):
     _, http, _ = env
-    result = await registered(http, redirect_uris=["https://chatgpt.com/connector/oauth/callback_123-ABC"],
+    result = await registered(http, redirect_uris=[redirect],
                               client_uri="http://127.0.0.1:9000/never-fetched")
     assert result["client_id"]
 

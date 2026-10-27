@@ -52,7 +52,10 @@ _PENDING_TTL = 300
 _ACCESS_TTL = 3600
 _REFRESH_TTL = 30 * 86400
 _COOKIE = "__Host-opsin_oauth_csrf"
-_CALLBACK = re.compile(r"https://chatgpt\.com/(?:connector_platform_oauth_redirect|connector/oauth/[A-Za-z0-9_-]{1,128})\Z")
+_CALLBACK = re.compile(
+    # ChatGPT's documented callbacks: the shared platform redirect and the
+    # per-connection segment (seen under both /connector/oauth and /assistant/oauth).
+    r"https://chatgpt\.com/(?:connector_platform_oauth_redirect|(?:connector|assistant)/oauth/[A-Za-z0-9_-]{1,128})\Z")
 _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
