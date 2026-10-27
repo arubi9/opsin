@@ -8,7 +8,7 @@ RUN mvn -B -ntp -DskipTests package
 
 FROM python:3.12-slim-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openjdk-17-jre-headless fonts-dejavu-core libxrender1 libxext6 \
+    openjdk-17-jre-headless fonts-dejavu-core libxrender1 libxext6 curl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /usr/local/bin/uv
 WORKDIR /app

@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+from hmac import compare_digest
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ from pydantic import Field
 from rdkit import Chem, rdBase
 from rdkit.Chem.Draw import rdMolDraw2D
 from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
@@ -106,6 +108,22 @@ async def depict_chemical(
 
 
 def create_app() -> Starlette:
+    key = os.environ.get("OPSIN_API_KEY")
+    if not key:
+        raise RuntimeError("OPSIN_API_KEY must be set and nonempty")
+    api_key = key.encode("utf-8")
+
+    async def require_api_key(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        if request.url.path != "/healthz":
+            authorization = request.headers.getlist("authorization")
+            bearer = (
+                re.fullmatch(r"Bearer +([A-Za-z0-9._~+/-]+=*)", authorization[0], re.IGNORECASE | re.ASCII)
+                if len(authorization) == 1 else None
+            )
+            if bearer is None or not compare_digest(bearer[1].encode("ascii"), api_key):
+                return Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})
+        return await call_next(request)
+
     public_host = os.environ.get("PUBLIC_HOST", "localhost")
     server = FastMCP(
         "OPSIN", instructions="Convert systematic chemical names to structures. Read the inline PNG and report any warnings.",
@@ -128,6 +146,7 @@ def create_app() -> Starlette:
         return Response(status_code=405, headers={"Allow": "POST, DELETE"})
 
     app = server.streamable_http_app()
+    app.add_middleware(BaseHTTPMiddleware, dispatch=require_api_key)
     # Stateless JSON responses need no standalone SSE channel.
     app.routes.insert(0, Route("/mcp", reject_sse, methods=["GET"]))
     return app

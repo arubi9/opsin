@@ -15,16 +15,100 @@ from starlette.testclient import TestClient
 import opsin_mcp as service
 
 
+TEST_API_KEY = "test-only-opsin-api-key"
+
+
+@pytest.fixture(autouse=True)
+def api_key(monkeypatch):
+    monkeypatch.setenv("OPSIN_API_KEY", TEST_API_KEY)
+
+
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("PUBLIC_HOST", "testserver")
-    with TestClient(service.create_app()) as client:
+    with TestClient(service.create_app(), headers={"Authorization": f"Bearer {TEST_API_KEY}"}) as client:
         yield client
 
 
 def rpc(client, method, params=None, **kwargs):
     return client.post("/mcp", headers={"Accept": "application/json, text/event-stream"},
                        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}, **kwargs)
+
+
+@pytest.mark.parametrize("key", [None, ""])
+def test_startup_requires_nonempty_api_key(monkeypatch, key):
+    if key is None:
+        monkeypatch.delenv("OPSIN_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("OPSIN_API_KEY", key)
+    with pytest.raises(RuntimeError, match="OPSIN_API_KEY"):
+        service.create_app()
+
+
+@pytest.mark.parametrize("authorization", [
+    None, "", "Basic not-a-bearer-token", "Bearer", "Bearer ", "Bearer wrong-key",
+    f"Bearer {TEST_API_KEY} extra", f"Bearer {TEST_API_KEY},other-token",
+    f"Bearer\t{TEST_API_KEY}", f"Bearer {TEST_API_KEY}\n", b"Bearer \xff", b"Bearer \xe2\x98\x83",
+])
+def test_unauthorized_requests_never_reach_parser(client, monkeypatch, caplog, authorization):
+    parser = AsyncMock(return_value=("CCO", ""))
+    monkeypatch.setattr(service, "smiles_for_name", parser)
+    client.headers.pop("Authorization")
+    if authorization is not None:
+        client.headers.update({"Authorization": authorization})
+    response = rpc(client, "tools/call", {"name": "depict_chemical", "arguments": {"name": "ethanol"}})
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    parser.assert_not_called()
+    assert TEST_API_KEY not in response.text + caplog.text
+    assert "wrong-key" not in response.text + caplog.text
+
+
+@pytest.mark.parametrize("prefix", ["Bearer ", "bEaReR ", "Bearer   "])
+def test_correct_bearer_reaches_parser(client, monkeypatch, prefix):
+    parser = AsyncMock(return_value=("CCO", ""))
+    monkeypatch.setattr(service, "smiles_for_name", parser)
+    client.headers["Authorization"] = prefix + TEST_API_KEY
+    response = rpc(client, "tools/call", {"name": "depict_chemical", "arguments": {"name": "ethanol"}})
+    assert response.status_code == 200
+    assert not response.json()["result"].get("isError")
+    parser.assert_awaited_once_with("ethanol")
+
+
+@pytest.mark.parametrize(("method", "path"), [
+    ("GET", "/mcp"), ("GET", "/mcp?probe=1"), ("DELETE", "/mcp"),
+    ("OPTIONS", "/mcp"), ("GET", "/unknown"), ("GET", "/healthz/"),
+])
+def test_all_other_paths_require_bearer(client, method, path):
+    client.headers.pop("Authorization")
+    response = client.request(method, path)
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_duplicate_authorization_headers_rejected(client, monkeypatch):
+    parser = AsyncMock(return_value=("CCO", ""))
+    monkeypatch.setattr(service, "smiles_for_name", parser)
+    client.headers.pop("Authorization")
+    response = client.post("/mcp", headers=[
+        ("Accept", "application/json, text/event-stream"),
+        ("Authorization", f"Bearer {TEST_API_KEY}"), ("Authorization", "Bearer wrong-key"),
+    ], json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "depict_chemical", "arguments": {"name": "ethanol"}}})
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    parser.assert_not_called()
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer wrong-key"])
+def test_health_is_unauthenticated(client, authorization):
+    client.headers.pop("Authorization")
+    if authorization is not None:
+        client.headers["Authorization"] = authorization
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert "WWW-Authenticate" not in response.headers
 
 
 def test_initialize_and_schema(client):
@@ -101,7 +185,8 @@ def test_host_origin_and_body_limits(client):
 async def test_stateless_endpoint_rejects_standalone_sse(path):
     app = service.create_app()
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost",
+                                     headers={"Authorization": f"Bearer {TEST_API_KEY}"}) as client:
             try:
                 response = await asyncio.wait_for(
                     client.get(path, headers={"Accept": "text/event-stream"}), timeout=1,
