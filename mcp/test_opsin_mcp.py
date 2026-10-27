@@ -212,6 +212,20 @@ def test_default_is_png_not_svg(client, monkeypatch):
     assert [part["type"] for part in result["content"]] == ["text", "image"]
 
 
+def test_linked_png_is_public_and_served_as_image(client, monkeypatch):
+    monkeypatch.setattr(service, "smiles_for_name", AsyncMock(return_value=("CCO", "")))
+    result = rpc(client, "tools/call", {"name": "depict_chemical", "arguments": {"name": "ethanol"}}).json()["result"]
+    url = json.loads(result["content"][0]["text"])["image_url"]
+    assert url.startswith("https://testserver/depict/")
+    client.headers.pop("Authorization")
+    served = client.get(url.split("testserver", 1)[1])
+    assert served.status_code == 200
+    assert served.headers["content-type"] == "image/png"
+    assert served.content == base64.b64decode(result["content"][1]["data"], validate=True)
+    assert client.get("/depict/" + "0" * 32 + ".png").status_code == 404
+    assert client.get("/depict/not-a-digest.png").status_code == 401
+
+
 @pytest.mark.parametrize("name", ["", "  ", "a" * 257, "ethanol\nmethane", "ethanol\x00", "ethanol\r", "ethanol\u2028methane"])
 def test_invalid_names_never_reach_parser(client, monkeypatch, name):
     parser = AsyncMock()

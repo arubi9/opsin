@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+from hashlib import sha256
 from hmac import compare_digest
 import json
 import os
@@ -31,6 +32,18 @@ JAR_PATH = Path(os.environ.get("OPSIN_JAR", Path(__file__).resolve().parents[1] 
 PARSER_TIMEOUT = 15
 _slot = asyncio.Lock()
 _BANNER = "Run the jar using the -h flag for help. Enter a chemical name to begin:"
+# ChatGPT connectors drop MCP image blocks, so the newest renderings stay addressable by URL.
+_DEPICTIONS: dict[str, bytes] = {}
+_DEPICTION_LIMIT = 64
+_DEPICTION_PATH = re.compile(r"/depict/[0-9a-f]{32}\.png")
+
+
+def _publish(png: bytes) -> str:
+    digest = sha256(png).hexdigest()[:32]
+    _DEPICTIONS[digest] = png
+    while len(_DEPICTIONS) > _DEPICTION_LIMIT:
+        _DEPICTIONS.pop(next(iter(_DEPICTIONS)))
+    return f"https://{os.environ.get('PUBLIC_HOST', 'localhost')}/depict/{digest}.png"
 
 
 async def smiles_for_name(name: str) -> tuple[str, str]:
@@ -92,10 +105,12 @@ async def depict_chemical(
             png = rdMolDraw2D.MolDraw2DCairo(640, 480)
             rdMolDraw2D.PrepareAndDrawMolecule(png, molecule)
             png.FinishDrawing()
-            metadata = {"name": name.strip(), "smiles": smiles, "warnings": warnings or None}
+            drawing = png.GetDrawingText()
+            metadata = {"name": name.strip(), "smiles": smiles, "warnings": warnings or None,
+                        "image_url": _publish(drawing)}
             content: list[TextContent | ImageContent] = [
                 TextContent(type="text", text=json.dumps(metadata, ensure_ascii=False)),
-                ImageContent(type="image", mimeType="image/png", data=base64.b64encode(png.GetDrawingText()).decode("ascii")),
+                ImageContent(type="image", mimeType="image/png", data=base64.b64encode(drawing).decode("ascii")),
             ]
             if include_svg:
                 svg = rdMolDraw2D.MolDraw2DSVG(640, 480)
@@ -132,7 +147,7 @@ def create_app() -> Starlette:
         if request.url.path != "/healthz" and not is_https:
             target = issuer_url + request.url.path + ("?" + request.url.query if request.url.query else "")
             return RedirectResponse(target, status_code=307, headers={"Cache-Control": "no-store"})
-        if request.url.path not in public_paths:
+        if request.url.path not in public_paths and not _DEPICTION_PATH.fullmatch(request.url.path):
             authorization = request.headers.getlist("authorization")
             bearer = (
                 re.fullmatch(r"Bearer +([A-Za-z0-9._~+/-]+=*)", authorization[0], re.IGNORECASE | re.ASCII)
@@ -151,7 +166,8 @@ def create_app() -> Starlette:
         return response
 
     server = FastMCP(
-        "OPSIN", instructions="Convert systematic chemical names to structures. Read the inline PNG and report any warnings.",
+        "OPSIN", instructions="Convert systematic chemical names to structures. Read the inline PNG and show the image_url "
+        "link so the user can see the drawing. Report any warnings.",
         host="0.0.0.0", port=8080, stateless_http=True, json_response=True,
         max_request_body_size=8192, log_level="WARNING",
         transport_security=TransportSecuritySettings(
@@ -166,6 +182,13 @@ def create_app() -> Starlette:
     async def health(_request: Request) -> JSONResponse:
         ready = JAR_PATH.is_file()
         return JSONResponse({"status": "ok" if ready else "unavailable"}, status_code=200 if ready else 503)
+
+    @server.custom_route("/depict/{key}.png", methods=["GET"])
+    async def depiction(request: Request) -> Response:
+        png = _DEPICTIONS.get(request.path_params["key"])
+        if png is None:
+            return Response(status_code=404, headers={"Cache-Control": "no-store"})
+        return Response(png, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
 
     async def reject_sse(_request: Request) -> Response:
         return Response(status_code=405, headers={"Allow": "POST, DELETE"})
