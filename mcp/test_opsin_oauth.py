@@ -402,7 +402,7 @@ async def test_expiry_cleanup(env, monkeypatch):
     code = await approved_code(http, client)
     _, fields = await consent_page(http, client)
     now = time.time()
-    monkeypatch.setattr(time, "time", lambda: now + 301)
+    monkeypatch.setattr(time, "time", lambda: now + 901)
     assert (await http.post("/oauth/consent", data={**fields, "api_key": KEY, "decision": "approve"})).status_code == 400
     assert oauth_error(await http.post("/token", data=code_form(client, code))) == "invalid_grant"
     monkeypatch.setattr(time, "time", lambda: now + 3601)
@@ -455,7 +455,7 @@ async def test_bounded_clients_pending_and_rate(env, monkeypatch):
     with sqlite3.connect(db) as connection:
         assert connection.execute("SELECT count(*) FROM clients").fetchone()[0] == 128
         assert connection.execute("SELECT count(*) FROM pending").fetchone()[0] == 128
-    monkeypatch.setattr(time, "time", lambda: now + 400)
+    monkeypatch.setattr(time, "time", lambda: now + 1000)
     assert (await http.get("/authorize", params=authorize_params(client))).status_code == 302
     with sqlite3.connect(db) as connection:
         assert connection.execute("SELECT count(*) FROM pending").fetchone()[0] == 1
@@ -790,5 +790,5 @@ async def test_audit_registration_flood_recovers_after_short_unapproved_ttl(env,
     for _ in range(128):
         assert (await register(http)).status_code == 201
     assert (await register(http)).status_code == 400
-    monkeypatch.setattr(time, "time", lambda: now + 301)
+    monkeypatch.setattr(time, "time", lambda: now + 901)
     assert (await register(http)).status_code == 201
