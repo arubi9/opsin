@@ -12,7 +12,7 @@ from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.transport_security import RequestBodyLimitMiddleware, TransportSecuritySettings
 from mcp.types import ImageContent, TextContent, ToolAnnotations
 from pydantic import Field
 from rdkit import Chem, rdBase
@@ -20,9 +20,11 @@ from rdkit.Chem.Draw import rdMolDraw2D
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 import uvicorn
+
+from opsin_oauth import OpsinOAuth
 
 JAR_PATH = Path(os.environ.get("OPSIN_JAR", Path(__file__).resolve().parents[1] /
                                "opsin-cli/target/opsin-cli-3.0-SNAPSHOT-jar-with-dependencies.jar"))
@@ -112,19 +114,42 @@ def create_app() -> Starlette:
     if not key:
         raise RuntimeError("OPSIN_API_KEY must be set and nonempty")
     api_key = key.encode("utf-8")
+    public_host = os.environ.get("PUBLIC_HOST", "localhost")
+    issuer_url = f"https://{public_host}"
+    oauth = OpsinOAuth(key, issuer_url, Path(os.environ.get(
+        "OPSIN_OAUTH_DB", Path(__file__).resolve().parent / ".oauth" / "tokens.sqlite3",
+    )))
+    oauth_routes = oauth.routes()
+    public_paths = {"/healthz", *(route.path for route in oauth_routes)}
 
-    async def require_api_key(request: Request, call_next: RequestResponseEndpoint) -> Response:
-        if request.url.path != "/healthz":
+    async def require_credentials(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        # Cloudflare terminates TLS before Coolify's private HTTP origin.
+        visitor = request.headers.getlist("cf-visitor")
+        is_https = (
+            bool(re.fullmatch(r'\s*\{\s*"scheme"\s*:\s*"https"\s*\}\s*', visitor[0]))
+            if len(visitor) == 1 else not visitor and request.url.scheme == "https"
+        )
+        if request.url.path != "/healthz" and not is_https:
+            target = issuer_url + request.url.path + ("?" + request.url.query if request.url.query else "")
+            return RedirectResponse(target, status_code=307, headers={"Cache-Control": "no-store"})
+        if request.url.path not in public_paths:
             authorization = request.headers.getlist("authorization")
             bearer = (
                 re.fullmatch(r"Bearer +([A-Za-z0-9._~+/-]+=*)", authorization[0], re.IGNORECASE | re.ASCII)
                 if len(authorization) == 1 else None
             )
-            if bearer is None or not compare_digest(bearer[1].encode("ascii"), api_key):
-                return Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})
-        return await call_next(request)
+            if bearer is None or not (
+                compare_digest(bearer[1].encode("ascii"), api_key) or await oauth.verify_token(bearer[1])
+            ):
+                return Response(status_code=401, headers={
+                    "WWW-Authenticate": f'Bearer resource_metadata="{issuer_url}/.well-known/oauth-protected-resource/mcp"',
+                    "Cache-Control": "no-store",
+                })
+        response = await call_next(request)
+        if is_https:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        return response
 
-    public_host = os.environ.get("PUBLIC_HOST", "localhost")
     server = FastMCP(
         "OPSIN", instructions="Convert systematic chemical names to structures. Read the inline PNG and report any warnings.",
         host="0.0.0.0", port=8080, stateless_http=True, json_response=True,
@@ -146,7 +171,9 @@ def create_app() -> Starlette:
         return Response(status_code=405, headers={"Allow": "POST, DELETE"})
 
     app = server.streamable_http_app()
-    app.add_middleware(BaseHTTPMiddleware, dispatch=require_api_key)
+    app.add_middleware(BaseHTTPMiddleware, dispatch=require_credentials)
+    app.add_middleware(RequestBodyLimitMiddleware, max_body_size=8192)
+    app.routes.extend(oauth_routes)
     # Stateless JSON responses need no standalone SSE channel.
     app.routes.insert(0, Route("/mcp", reject_sse, methods=["GET"]))
     return app

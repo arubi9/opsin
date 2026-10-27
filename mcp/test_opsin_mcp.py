@@ -19,14 +19,15 @@ TEST_API_KEY = "test-only-opsin-api-key"
 
 
 @pytest.fixture(autouse=True)
-def api_key(monkeypatch):
+def api_key(monkeypatch, tmp_path):
     monkeypatch.setenv("OPSIN_API_KEY", TEST_API_KEY)
+    monkeypatch.setenv("OPSIN_OAUTH_DB", str(tmp_path / "oauth" / "tokens.sqlite3"))
 
 
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("PUBLIC_HOST", "testserver")
-    with TestClient(service.create_app(), headers={"Authorization": f"Bearer {TEST_API_KEY}"}) as client:
+    with TestClient(service.create_app(), base_url="https://testserver", headers={"Authorization": f"Bearer {TEST_API_KEY}"}) as client:
         yield client
 
 
@@ -58,7 +59,7 @@ def test_unauthorized_requests_never_reach_parser(client, monkeypatch, caplog, a
         client.headers.update({"Authorization": authorization})
     response = rpc(client, "tools/call", {"name": "depict_chemical", "arguments": {"name": "ethanol"}})
     assert response.status_code == 401
-    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert response.headers["WWW-Authenticate"].startswith("Bearer ")
     parser.assert_not_called()
     assert TEST_API_KEY not in response.text + caplog.text
     assert "wrong-key" not in response.text + caplog.text
@@ -83,7 +84,7 @@ def test_all_other_paths_require_bearer(client, method, path):
     client.headers.pop("Authorization")
     response = client.request(method, path)
     assert response.status_code == 401
-    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert response.headers["WWW-Authenticate"].startswith("Bearer ")
 
 
 def test_duplicate_authorization_headers_rejected(client, monkeypatch):
@@ -96,7 +97,7 @@ def test_duplicate_authorization_headers_rejected(client, monkeypatch):
     ], json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
              "params": {"name": "depict_chemical", "arguments": {"name": "ethanol"}}})
     assert response.status_code == 401
-    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert response.headers["WWW-Authenticate"].startswith("Bearer ")
     parser.assert_not_called()
 
 
@@ -109,6 +110,71 @@ def test_health_is_unauthenticated(client, authorization):
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
     assert "WWW-Authenticate" not in response.headers
+
+
+@pytest.mark.parametrize("path", ["/mcp", "/authorize", "/oauth/consent", "/register", "/token", "/revoke"])
+def test_cleartext_requests_redirect_to_configured_https_origin(monkeypatch, path):
+    monkeypatch.setenv("PUBLIC_HOST", "testserver")
+    with TestClient(service.create_app(), base_url="http://testserver", follow_redirects=False) as cleartext:
+        response = cleartext.get(path + "?state=opaque", headers={"Host": "untrusted.example"})
+        assert response.status_code == 307
+        assert response.headers["location"] == "https://testserver" + path + "?state=opaque"
+        assert response.headers["Cache-Control"] == "no-store"
+        assert cleartext.get("/healthz").status_code in (200, 503)
+
+
+@pytest.mark.parametrize("visitor", ['{"scheme":"https"}', '{ "scheme" : "https" }'])
+def test_cloudflare_tls_termination_keeps_oauth_working(monkeypatch, visitor):
+    monkeypatch.setenv("PUBLIC_HOST", "testserver")
+    with TestClient(service.create_app(), base_url="http://testserver", follow_redirects=False) as origin:
+        response = origin.get("/.well-known/oauth-authorization-server", headers={"CF-Visitor": visitor})
+        assert response.status_code == 200
+        assert response.headers["Strict-Transport-Security"] == "max-age=31536000"
+
+
+@pytest.mark.parametrize("visitor", ['{"scheme":"http"}', "invalid", '{"scheme":"https","other":1}'])
+def test_insecure_or_malformed_edge_scheme_does_not_bypass_https(monkeypatch, visitor):
+    monkeypatch.setenv("PUBLIC_HOST", "testserver")
+    with TestClient(service.create_app(), base_url="http://testserver", follow_redirects=False) as origin:
+        response = origin.get("/authorize", headers={"CF-Visitor": visitor})
+        assert response.status_code == 307
+        assert response.headers["location"] == "https://testserver/authorize"
+
+
+def test_oauth_discovery_is_public_and_uses_configured_origin(client):
+    client.headers.pop("Authorization")
+    resource = client.get("/.well-known/oauth-protected-resource/mcp", headers={"Host": "untrusted.example"})
+    assert resource.status_code == 200
+    assert resource.json()["resource"] == "https://testserver/mcp"
+    assert [issuer.rstrip("/") for issuer in resource.json()["authorization_servers"]] == ["https://testserver"]
+    assert resource.json()["scopes_supported"] == ["opsin:depict"]
+    discovery = client.get("/.well-known/oauth-authorization-server")
+    assert discovery.status_code == 200
+    metadata = discovery.json()
+    assert metadata["issuer"].rstrip("/") == "https://testserver"
+    assert metadata["authorization_endpoint"] == "https://testserver/authorize"
+    assert metadata["token_endpoint"] == "https://testserver/token"
+    assert metadata["registration_endpoint"] == "https://testserver/register"
+    assert metadata["code_challenge_methods_supported"] == ["S256"]
+    assert TEST_API_KEY not in resource.text + discovery.text
+
+
+def test_unauthorized_mcp_advertises_oauth_discovery_without_disabling_auth(client, monkeypatch):
+    parser = AsyncMock()
+    monkeypatch.setattr(service, "smiles_for_name", parser)
+    client.headers.pop("Authorization")
+    response = rpc(client, "tools/list")
+    assert response.status_code == 401
+    assert 'resource_metadata="https://testserver/.well-known/oauth-protected-resource/mcp"' in response.headers["WWW-Authenticate"]
+    assert response.headers["Cache-Control"] == "no-store"
+    parser.assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["/register", "/token", "/oauth/consent"])
+def test_public_oauth_endpoints_keep_request_body_limit(client, path):
+    client.headers.pop("Authorization")
+    response = client.post(path, content=b"x" * 8193)
+    assert response.status_code == 413
 
 
 def test_initialize_and_schema(client):
@@ -185,7 +251,7 @@ def test_host_origin_and_body_limits(client):
 async def test_stateless_endpoint_rejects_standalone_sse(path):
     app = service.create_app()
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost",
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://localhost",
                                      headers={"Authorization": f"Bearer {TEST_API_KEY}"}) as client:
             try:
                 response = await asyncio.wait_for(
