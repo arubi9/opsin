@@ -46,6 +46,24 @@ public class StereochemistryEdgeCasesIntegrationTest {
 	}
 
 	@ParameterizedTest
+	@CsvSource(delimiter = '|', value = {
+		"cis,cis-hexa-2,4-diene | (2Z,4Z)-hexa-2,4-diene",
+		"trans,trans-hexa-2,4-diene | (2E,4E)-hexa-2,4-diene",
+		"cis,cis-muconic acid | (2Z,4Z)-muconic acid",
+		"trans,trans-muconic acid | (2E,4E)-muconic acid",
+		"cis,cis-hepta-2,4-diene | (2Z,4Z)-hepta-2,4-diene",
+		"trans,trans-hepta-2,4-diene | (2E,4E)-hepta-2,4-diene",
+		"(2E)-cis,cis-octa-2,4,6-triene | (2E,4Z,6Z)-octa-2,4,6-triene"
+	})
+	public void repeatedCisTransPreservesAllDoubleBondConfigurations(String name, String equivalentEZName) {
+		OpsinResult result = NameToStructure.getInstance().parseChemicalName(name);
+		assertEquals(OPSIN_RESULT_STATUS.SUCCESS, result.getStatus(), result.getMessage());
+		OpsinResult expected = NameToStructure.getInstance().parseChemicalName(equivalentEZName);
+		assertEquals(OPSIN_RESULT_STATUS.SUCCESS, expected.getStatus(), expected.getMessage());
+		assertEquals(NameToInchi.convertResultToStdInChI(expected), NameToInchi.convertResultToStdInChI(result));
+	}
+
+	@ParameterizedTest
 	@ValueSource(strings = {"CIS-2,3-dichlorobut-2-ene", "cis–2,3-dichlorobut–2–ene",
 		"  CIS–2,3-dichlorobut–2–ene  ", "(cis)-2,3-dichlorobut-2-ene"})
 	public void formattingVariantsPreserveCisGeometry(String name) {

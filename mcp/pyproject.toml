@@ -1,0 +1,19 @@
+[project]
+name = "opsin-mcp"
+version = "0.1.0"
+description = "Thin remote MCP connector for OPSIN chemical structure depictions"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.30,<2",
+    "rdkit>=2025.9,<2026",
+    "pillow>=12,<13",
+]
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "pytest-asyncio>=1,<2", "httpx>=0.28,<1", "ty>=0.0.30,<0.1"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ty.environment]
+python-version = "3.12"
