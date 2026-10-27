@@ -46,9 +46,10 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 SCOPE = "opsin:depict"
 _LIMIT = 128
-_UNAPPROVED_TTL = 300
+_UNAPPROVED_TTL = 900
 _SPENT_LIMIT = 4096
-_PENDING_TTL = 300
+_PENDING_TTL = 900
+_CODE_TTL = 300
 _ACCESS_TTL = 3600
 _REFRESH_TTL = 30 * 86400
 _COOKIE = "__Host-opsin_oauth_csrf"
@@ -391,7 +392,7 @@ class OpsinOAuth(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToke
                 if not self._room(connection, "codes"):
                     return _error(503)
                 code = AuthorizationCode(code=secrets.token_urlsafe(32), client_id=data["client_id"],
-                                         expires_at=time.time() + _PENDING_TTL, subject="owner", **params.model_dump(exclude={"state"}))
+                                         expires_at=time.time() + _CODE_TTL, subject="owner", **params.model_dump(exclude={"state"}))
                 connection.execute("INSERT INTO codes VALUES (?, ?, ?)",
                                    (_hash(code.code), code.expires_at, code.model_dump_json(exclude={"code"})))
                 # Only authenticated, explicit approval makes registration durable.
