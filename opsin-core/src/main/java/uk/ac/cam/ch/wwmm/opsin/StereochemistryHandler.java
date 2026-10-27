@@ -421,8 +421,9 @@ class StereochemistryHandler {
 				throw new StructureBuildingException("Unexpected cis/trans stereochemistry type: " +cisOrTrans);
 			}
 		}
+		int identicalUnlocantedCisTrans = isCisTrans && locant == null ? countIdenticalUnlocantedCisTrans(stereoChemistryEl) : 1;
 		for (Fragment fragment : possibleFragments) {
-			if (attemptAssignmentOfStereoBondToFragment(fragment, eOrZ, locant, isCisTrans)) {
+			if (attemptAssignmentOfStereoBondToFragment(fragment, eOrZ, locant, isCisTrans, identicalUnlocantedCisTrans)) {
 				return;
 			}
 		}
@@ -434,7 +435,7 @@ class StereochemistryHandler {
 			for (Element word : words) {
 				List<Element> possibleGroups = OpsinTools.getDescendantElementsWithTagName(word, GROUP_EL);
 				for (int i = possibleGroups.size()-1; i >=0; i--) {
-					if (attemptAssignmentOfStereoBondToFragment(possibleGroups.get(i).getFrag(), eOrZ, locant, isCisTrans)) {
+					if (attemptAssignmentOfStereoBondToFragment(possibleGroups.get(i).getFrag(), eOrZ, locant, isCisTrans, identicalUnlocantedCisTrans)) {
 						return;
 					}
 				}
@@ -449,7 +450,31 @@ class StereochemistryHandler {
 	}
 
 
-	private boolean attemptAssignmentOfStereoBondToFragment(Fragment fragment, String eOrZ, String locant, boolean isCisTrans) throws StereochemistryException {
+	/**
+	 * Counts remaining identical cis/trans descriptors in the same scope. Mixed
+	 * unlocanted bond descriptors cannot be assigned to multiple bonds without locants.
+	 */
+	private int countIdenticalUnlocantedCisTrans(Element stereoChemistryEl) {
+		int count = 0;
+		for (Element sibling : stereoChemistryEl.getParent().getChildElements(STEREOCHEMISTRY_EL)) {
+			if (sibling.getAttributeValue(LOCANT_ATR) != null) {
+				continue;
+			}
+			String type = sibling.getAttributeValue(TYPE_ATR);
+			if (CISORTRANS_TYPE_VAL.equals(type)) {
+				if (!stereoChemistryEl.getAttributeValue(VALUE_ATR).equalsIgnoreCase(sibling.getAttributeValue(VALUE_ATR))) {
+					return 1;
+				}
+				count++;
+			}
+			else if (E_OR_Z_TYPE_VAL.equals(type)) {
+				return 1;
+			}
+		}
+		return count;
+	}
+
+	private boolean attemptAssignmentOfStereoBondToFragment(Fragment fragment, String eOrZ, String locant, boolean isCisTrans, int identicalUnlocantedCisTrans) throws StereochemistryException {
 		if (locant == null){//undefined locant
 			Set<Bond> bondSet = fragment.getBondSet();
 			List<Bond> sortedInterFragmentBonds = sortInterFragmentBonds(state.fragManager.getInterFragmentBonds(fragment), fragment);
@@ -459,10 +484,12 @@ class StereochemistryHandler {
 				int eligibleBonds = 0;
 				for (Bond candidate : candidates) {
 					if (notExplicitlyDefinedStereoBondMap.containsKey(candidate) && cisTransUnambiguousOnBond(candidate)) {
-						if (++eligibleBonds > 1) {
-							throw new StereochemistryException("More than one bond could match unlocanted cis/trans stereochemistry; specify a locant");
-						}
+						eligibleBonds++;
 					}
+				}
+				// Assignment order is immaterial only when identical descriptors cover every eligible bond.
+				if (eligibleBonds > 1 && eligibleBonds != identicalUnlocantedCisTrans) {
+					throw new StereochemistryException("More than one bond could match unlocanted cis/trans stereochemistry; specify a locant");
 				}
 			}
 			for (Bond potentialBond : bondSet) {

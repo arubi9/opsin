@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import uk.ac.cam.ch.wwmm.opsin.OpsinResult.OPSIN_RESULT_STATUS;
@@ -14,8 +15,36 @@ import uk.ac.cam.ch.wwmm.opsin.OpsinWarning.OpsinWarningType;
 public class StereochemistryEdgeCasesTest {
 
 	@ParameterizedTest
+	@CsvSource(delimiter = '|', value = {
+		"cis,cis-hexa-2,4-diene | (2Z,4Z)-hexa-2,4-diene | 2",
+		"trans,trans-hexa-2,4-diene | (2E,4E)-hexa-2,4-diene | 2",
+		"cis,cis-muconic acid | (2Z,4Z)-muconic acid | 2",
+		"trans,trans-muconic acid | (2E,4E)-muconic acid | 2",
+		"cis,cis-hepta-2,4-diene | (2Z,4Z)-hepta-2,4-diene | 2",
+		"trans,trans-hepta-2,4-diene | (2E,4E)-hepta-2,4-diene | 2",
+		"cis,cis,cis-octa-2,4,6-triene | (2Z,4Z,6Z)-octa-2,4,6-triene | 3",
+		"trans,trans,trans-octa-2,4,6-triene | (2E,4E,6E)-octa-2,4,6-triene | 3",
+		"cis,cis-2,3,5,6-tetrachlorohepta-2,5-diene | (2Z,5Z)-2,3,5,6-tetrachlorohepta-2,5-diene | 2",
+		"trans,trans-2,3,5,6-tetrachlorohepta-2,5-diene | (2E,5E)-2,3,5,6-tetrachlorohepta-2,5-diene | 2",
+		"(2E)-cis,cis-octa-2,4,6-triene | (2E,4Z,6Z)-octa-2,4,6-triene | 3",
+		"(cis,cis)-hexa-2,4-diene | (2Z,4Z)-hexa-2,4-diene | 2"
+	})
+	public void repeatedIdenticalCisTransFullySpecifiesEligibleBonds(String name, String equivalentEZName, int stereoBondCount) {
+		OpsinResult result = NameToStructure.getInstance().parseChemicalName(name);
+		assertEquals(OPSIN_RESULT_STATUS.SUCCESS, result.getStatus(), result.getMessage());
+		OpsinResult expected = NameToStructure.getInstance().parseChemicalName(equivalentEZName);
+		assertEquals(OPSIN_RESULT_STATUS.SUCCESS, expected.getStatus(), expected.getMessage());
+		assertEquals(expected.getSmiles(), result.getSmiles());
+		assertEquals(stereoBondCount, result.getStructure().getBondSet().stream()
+				.filter(bond -> bond.getBondStereo() != null).count());
+	}
+
+	@ParameterizedTest
 	@ValueSource(strings = {
 		"cis-hepta-2,4-diene", "trans-hepta-2,4-diene",
+		"cis,cis-octa-2,4,6-triene", "trans,trans-octa-2,4,6-triene",
+		"cis,trans-hepta-2,4-diene", "trans,cis-hepta-2,4-diene",
+		"cis,cis,trans-nona-2,4,6-triene", "trans,trans,cis-nona-2,4,6-triene",
 		"cis-2,3,5,6-tetrachlorohepta-2,5-diene",
 		"trans-2,3,5,6-tetrachlorohepta-2,5-diene"
 	})

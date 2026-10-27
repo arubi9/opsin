@@ -1,0 +1,8 @@
+.git
+.worktrees
+**/target
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ty_cache
+.pi

@@ -1,0 +1,35 @@
+name: MCP connector
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  connector:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.12.5'
+          python-version: '3.12'
+      - name: Build and test OPSIN
+        run: mvn -B -ntp test package
+      - name: Check connector types
+        working-directory: mcp
+        run: uv run --locked ty check
+      - name: Test MCP transport, images, and real OPSIN
+        working-directory: mcp
+        env:
+          OPSIN_JAR: ${{ github.workspace }}/opsin-cli/target/opsin-cli-3.0-SNAPSHOT-jar-with-dependencies.jar
+        run: uv run --locked pytest -q
+      - name: Build deployment image
+        run: docker build -f mcp/Dockerfile -t opsin-mcp:test .
