@@ -11,6 +11,7 @@ import hashlib
 import hmac
 from html import escape
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -75,6 +76,9 @@ def _equal(left: str, right: str) -> bool:
 
 def _error(status: int = 400) -> Response:
     return JSONResponse({"error": "invalid_request"}, status_code=status, headers=_SECURITY_HEADERS)
+
+
+_LOG = logging.getLogger("opsin.oauth")
 
 
 async def _client_request(request: Request, *, revoke: bool = False) -> Request | Response:
@@ -334,29 +338,36 @@ class OpsinOAuth(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToke
         return self.issuer_url + "/oauth/consent?transaction=" + transaction
 
     async def _consent(self, request: Request) -> Response:
+        def reject(reason: str, status: int = 400) -> Response:
+            """One body for every refusal, but say why in the logs."""
+            _LOG.warning("consent rejected: %s", reason)
+            return _error(status)
+
         if request.method == "POST":
-            if (request.headers.get("origin") not in (None, self._origin)
+            # "null" is what a sandboxed or embedded document sends; the CSRF
+            # double submit below is what actually authenticates this form.
+            if (request.headers.get("origin") not in (None, "null", self._origin)
                     or request.headers.get("sec-fetch-site") == "cross-site"):
-                return _error(403)
+                return reject(f"origin {request.headers.get('origin')!r}", 403)
             try:
                 fields = await request.form()
             except (HTTPException, ValueError, UnicodeError):
-                return _error()
+                return reject("unparsable form")
         else:
             fields = request.query_params
         transaction = fields.get("transaction", "")
         if not isinstance(transaction, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", transaction):
-            return _error()
+            return reject("malformed transaction")
         with self._db() as connection:
             row = connection.execute("SELECT * FROM pending WHERE key=?", (_hash(transaction),)).fetchone()
             if not row:
-                return _error()
+                return reject("unknown or expired transaction")
             data = json.loads(row["data"])
             params = AuthorizationParams.model_validate(data["params"])
             client_row = connection.execute("SELECT data FROM clients WHERE id=?", (data["client_id"],)).fetchone()
             client = OAuthClientInformationFull.model_validate_json(client_row["data"]) if client_row else None
             if not client or params.resource != self.resource_url or params.redirect_uri not in (client.redirect_uris or []):
-                return _error()
+                return reject("client or redirect mismatch")
             if request.method == "GET":
                 csrf = secrets.token_urlsafe(32)
                 connection.execute("UPDATE pending SET csrf=? WHERE key=?", (_hash(csrf), _hash(transaction)))
@@ -379,18 +390,18 @@ class OpsinOAuth(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToke
             cookie = request.cookies.get(_COOKIE, "")
             if (not isinstance(csrf, str) or not csrf or not cookie or not row["csrf"]
                     or not _equal(csrf, cookie) or not _equal(_hash(csrf), row["csrf"])):
-                return _error(403)
+                return reject("csrf mismatch", 403)
             if not self._rate(connection, "consent"):
-                return _error(429)
+                return reject("rate limited", 429)
             decision = fields.get("decision")
             if decision == "deny":
                 redirect = construct_redirect_uri(str(params.redirect_uri), error="access_denied", state=params.state)
             elif decision == "approve":
                 key = fields.get("api_key", "")
                 if not isinstance(key, str) or not _equal(key, self._api_key):
-                    return _error(403)
+                    return reject("wrong service key", 403)
                 if not self._room(connection, "codes"):
-                    return _error(503)
+                    return reject("code store full", 503)
                 code = AuthorizationCode(code=secrets.token_urlsafe(32), client_id=data["client_id"],
                                          expires_at=time.time() + _CODE_TTL, subject="owner", **params.model_dump(exclude={"state"}))
                 connection.execute("INSERT INTO codes VALUES (?, ?, ?)",

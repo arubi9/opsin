@@ -221,7 +221,7 @@ async def test_consent_get_security_headers_escaping_no_code_or_secret(env):
 
 
 @pytest.mark.parametrize("attack", ["missing_cookie", "wrong_cookie", "missing_csrf", "wrong_csrf", "wrong_key",
-                                   "cross_origin", "null_origin", "fetch_cross_site", "no_decision", "deny"])
+                                   "cross_origin", "fetch_cross_site", "no_decision", "deny"])
 async def test_consent_protection_matrix(env, attack, caplog):
     _, http, db = env
     client = await registered(http)
@@ -241,8 +241,6 @@ async def test_consent_protection_matrix(env, attack, caplog):
         data["api_key"] = "incorrect-secret-never-reflect"
     if attack == "cross_origin":
         headers["Origin"] = "https://evil.example"
-    if attack == "null_origin":
-        headers["Origin"] = "null"
     if attack == "fetch_cross_site":
         headers["Sec-Fetch-Site"] = "cross-site"
     if attack == "no_decision":
@@ -258,6 +256,18 @@ async def test_consent_protection_matrix(env, attack, caplog):
     assert "incorrect-secret-never-reflect" not in response.text + caplog.text
     with sqlite3.connect(db) as connection:
         assert connection.execute("SELECT count(*) FROM codes").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("origin", ["null", None])
+async def test_consent_approval_from_sandboxed_document(env, origin):
+    """An embedded or sandboxed consent page posts Origin: null and still works."""
+    _, http, _ = env
+    client = await registered(http)
+    _, fields = await consent_page(http, client)
+    headers = {} if origin is None else {"Origin": origin}
+    response = await http.post("/oauth/consent", data={**fields, "api_key": KEY, "decision": "approve"},
+                               headers=headers)
+    assert response.status_code == 302 and "code=" in response.headers["location"]
 
 
 async def test_consent_one_time_and_wrong_key_cannot_retry(env):
