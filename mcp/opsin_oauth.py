@@ -348,7 +348,7 @@ class OpsinOAuth(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToke
             # double submit below is what actually authenticates this form.
             if (request.headers.get("origin") not in (None, "null", self._origin)
                     or request.headers.get("sec-fetch-site") == "cross-site"):
-                return reject(f"origin {request.headers.get('origin')!r}", 403)
+                return reject(f"origin {(request.headers.get('origin') or '')[:80]!r}", 403)
             try:
                 fields = await request.form()
             except (HTTPException, ValueError, UnicodeError):
