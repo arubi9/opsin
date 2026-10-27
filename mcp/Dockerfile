@@ -13,11 +13,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /usr/local/bin/uv
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never \
-    OPSIN_JAR=/app/opsin.jar
+    OPSIN_JAR=/app/opsin.jar OPSIN_OAUTH_DB=/data/oauth/tokens.sqlite3
 COPY mcp/pyproject.toml mcp/uv.lock ./
 RUN uv sync --locked --no-dev
 COPY --from=opsin /build/opsin-cli/target/opsin-cli-3.0-SNAPSHOT-jar-with-dependencies.jar /app/opsin.jar
-COPY mcp/opsin_mcp.py ./
+COPY mcp/opsin_mcp.py mcp/opsin_oauth.py ./
+RUN mkdir -p /data/oauth && chown 10001:10001 /data/oauth && chmod 0700 /data/oauth
 USER 10001:10001
 EXPOSE 8080
 CMD ["/app/.venv/bin/python", "opsin_mcp.py"]
