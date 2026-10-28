@@ -3,6 +3,10 @@ import base64
 import io
 import json
 import os
+from pathlib import Path
+import subprocess
+import sys
+import time
 from unittest.mock import AsyncMock
 import xml.etree.ElementTree as ET
 
@@ -22,6 +26,7 @@ TEST_API_KEY = "test-only-opsin-api-key"
 def api_key(monkeypatch, tmp_path):
     monkeypatch.setenv("OPSIN_API_KEY", TEST_API_KEY)
     monkeypatch.setenv("OPSIN_OAUTH_DB", str(tmp_path / "oauth" / "tokens.sqlite3"))
+    monkeypatch.setenv("OPSIN_DEPICTION_DB", str(tmp_path / "depictions" / "images.sqlite3"))
 
 
 @pytest.fixture
@@ -224,6 +229,84 @@ def test_linked_png_is_public_and_served_as_image(client, monkeypatch):
     assert served.content == base64.b64decode(result["content"][1]["data"], validate=True)
     assert client.get("/depict/" + "0" * 32 + ".png").status_code == 404
     assert client.get("/depict/not-a-digest.png").status_code == 401
+
+
+def test_depiction_survives_publisher_process_exit(client):
+    publisher = subprocess.run(
+        [sys.executable, "-c", "import opsin_mcp; print(opsin_mcp._publish(b'persisted depiction'))"],
+        cwd=Path(service.__file__).parent, capture_output=True, text=True, check=True,
+    )
+    client.headers.pop("Authorization")
+    response = client.get(publisher.stdout.strip())
+    assert response.status_code == 200
+    assert response.content == b"persisted depiction"
+
+
+def test_depictions_are_not_evicted_after_64_images(client):
+    url = service._publish(b"first depiction")
+    for i in range(70):
+        service._publish(f"depiction {i}".encode())
+    assert client.get(url).content == b"first depiction"
+
+
+def test_depiction_expires_after_seven_days(client, monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    url = service._publish(b"expiring depiction")
+    now += 7 * 24 * 60 * 60 - 30
+    response = client.get(url)
+    assert response.status_code == 200
+    max_age = int(response.headers["cache-control"].split("max-age=")[1])
+    assert 0 <= max_age <= 30
+    now += 30
+    response = client.get(url)
+    assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_republishing_refreshes_expiry(client, monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    url = service._publish(b"reused depiction")
+    now += 6 * 24 * 60 * 60
+    assert service._publish(b"reused depiction") == url
+    now += 2 * 24 * 60 * 60
+    assert client.get(url).content == b"reused depiction"
+
+
+def test_depiction_storage_is_bounded_and_expired_space_is_reused(client, monkeypatch):
+    monkeypatch.setattr(service, "_DEPICTION_MAX_BYTES", 64 * 1024, raising=False)
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    url = service._publish(b"keep this image")
+    for _ in range(20):
+        try:
+            service._publish(os.urandom(8192))
+        except ToolError as exc:
+            assert "storage" in str(exc).lower()
+            break
+    else:
+        pytest.fail("Image storage exceeded its capacity without rejecting publication")
+    assert Path(os.environ["OPSIN_DEPICTION_DB"]).stat().st_size <= 64 * 1024
+    assert client.get(url).content == b"keep this image"
+    now += 7 * 24 * 60 * 60
+    new_url = service._publish(b"new depiction after cleanup")
+    assert client.get(new_url).content == b"new depiction after cleanup"
+    assert client.get(url).status_code == 404
+    assert Path(os.environ["OPSIN_DEPICTION_DB"]).stat().st_size <= 64 * 1024
+
+
+def test_depiction_storage_errors_are_reported(client, monkeypatch, tmp_path):
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("blocked")
+    monkeypatch.setenv("OPSIN_DEPICTION_DB", str(blocker / "images.sqlite3"))
+    monkeypatch.setattr(service, "smiles_for_name", AsyncMock(return_value=("CCO", "")))
+    result = rpc(client, "tools/call", {"name": "depict_chemical", "arguments": {"name": "ethanol"}}).json()["result"]
+    assert result["isError"]
+    assert "storage" in result["content"][0]["text"].lower()
+    response = client.get("/depict/" + "0" * 32 + ".png")
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
 
 
 @pytest.mark.parametrize("name", ["", "  ", "a" * 257, "ethanol\nmethane", "ethanol\x00", "ethanol\r", "ethanol\u2028methane"])

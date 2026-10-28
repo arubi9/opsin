@@ -1,13 +1,16 @@
-"""Stateless OPSIN connector. The PNG content block is sent directly to model vision."""
+"""OPSIN connector with bounded, persistent storage for public PNG depictions."""
 
 import asyncio
 import base64
+from contextlib import closing
 from hashlib import sha256
 from hmac import compare_digest
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
+import time
 import unicodedata
 from typing import Annotated
 
@@ -32,17 +35,44 @@ JAR_PATH = Path(os.environ.get("OPSIN_JAR", Path(__file__).resolve().parents[1] 
 PARSER_TIMEOUT = 15
 _slot = asyncio.Lock()
 _BANNER = "Run the jar using the -h flag for help. Enter a chemical name to begin:"
-# ChatGPT connectors drop MCP image blocks, so the newest renderings stay addressable by URL.
-_DEPICTIONS: dict[str, bytes] = {}
-_DEPICTION_LIMIT = 64
+# ChatGPT connectors drop MCP image blocks, so renderings stay addressable by URL.
+_DEPICTION_TTL = 7 * 24 * 60 * 60
+_DEPICTION_MAX_BYTES = 256 * 1024 * 1024
 _DEPICTION_PATH = re.compile(r"/depict/[0-9a-f]{32}\.png")
+
+
+def _depiction_db() -> sqlite3.Connection:
+    oauth_db = Path(os.environ.get("OPSIN_OAUTH_DB", Path(__file__).resolve().parent / ".oauth" / "tokens.sqlite3"))
+    path = Path(os.environ.get("OPSIN_DEPICTION_DB", oauth_db.with_name("depictions.sqlite3")))
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    db = sqlite3.connect(path, timeout=5)
+    try:
+        path.chmod(0o600)
+        page_size = db.execute("PRAGMA page_size").fetchone()[0]
+        db.execute(f"PRAGMA max_page_count = {_DEPICTION_MAX_BYTES // page_size}")
+        db.executescript("""
+            CREATE TABLE IF NOT EXISTS depictions (key TEXT PRIMARY KEY, png BLOB NOT NULL, expires REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS depiction_expiry ON depictions(expires);
+        """)
+    except BaseException:
+        db.close()
+        raise
+    return db
 
 
 def _publish(png: bytes) -> str:
     digest = sha256(png).hexdigest()[:32]
-    _DEPICTIONS[digest] = png
-    while len(_DEPICTIONS) > _DEPICTION_LIMIT:
-        _DEPICTIONS.pop(next(iter(_DEPICTIONS)))
+    try:
+        with closing(_depiction_db()) as db:
+            # Commit cleanup separately so a full-database rollback cannot restore expired images.
+            with db:
+                db.execute("DELETE FROM depictions WHERE expires <= ?", (time.time(),))
+            with db:
+                db.execute("""INSERT INTO depictions (key, png, expires) VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET expires = excluded.expires""",
+                           (digest, png, time.time() + _DEPICTION_TTL))
+    except (OSError, sqlite3.Error) as exc:
+        raise ToolError("Image storage is full or unavailable. Try again later.") from exc
     return f"https://{os.environ.get('PUBLIC_HOST', 'localhost')}/depict/{digest}.png"
 
 
@@ -86,6 +116,7 @@ async def depict_chemical(
     Optionally include SVG source as text. The PNG, not the SVG, is the model-readable
     image. Not all common or trade names are supported. Warnings must be reported.
     Racemic and relative stereochemistry are rejected rather than depicted as absolute.
+    Public image URLs expire seven days after their last generation.
     Public service: do not submit confidential structures. No chemical safety assessment.
     """
     if not name.strip() or len(name) > 256 or any(unicodedata.category(c).startswith("C") or
@@ -185,10 +216,18 @@ def create_app() -> Starlette:
 
     @server.custom_route("/depict/{key}.png", methods=["GET"])
     async def depiction(request: Request) -> Response:
-        png = _DEPICTIONS.get(request.path_params["key"])
-        if png is None:
+        try:
+            with closing(_depiction_db()) as db:
+                with db:
+                    db.execute("DELETE FROM depictions WHERE expires <= ?", (time.time(),))
+                row = db.execute("SELECT png, expires FROM depictions WHERE key = ? AND expires > ?",
+                                 (request.path_params["key"], time.time())).fetchone()
+        except (OSError, sqlite3.Error):
+            return Response(status_code=503, headers={"Cache-Control": "no-store"})
+        if row is None:
             return Response(status_code=404, headers={"Cache-Control": "no-store"})
-        return Response(png, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
+        max_age = min(3600, max(0, int(row[1] - time.time())))
+        return Response(row[0], media_type="image/png", headers={"Cache-Control": f"public, max-age={max_age}"})
 
     async def reject_sse(_request: Request) -> Response:
         return Response(status_code=405, headers={"Allow": "POST, DELETE"})

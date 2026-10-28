@@ -13,7 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /usr/local/bin/uv
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never \
-    OPSIN_JAR=/app/opsin.jar OPSIN_OAUTH_DB=/data/oauth/tokens.sqlite3
+    OPSIN_JAR=/app/opsin.jar OPSIN_OAUTH_DB=/data/oauth/tokens.sqlite3 \
+    OPSIN_DEPICTION_DB=/data/oauth/depictions.sqlite3
 COPY mcp/pyproject.toml mcp/uv.lock ./
 RUN uv sync --locked --no-dev
 COPY --from=opsin /build/opsin-cli/target/opsin-cli-3.0-SNAPSHOT-jar-with-dependencies.jar /app/opsin.jar
